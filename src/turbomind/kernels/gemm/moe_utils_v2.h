@@ -42,18 +42,16 @@ void invokeMoeDispatchScales(Ref<Tensor>   out_,  //
                              cudaStream_t  st);
 
 void invokeMoeCombine(Ref<Tensor>   out_,
-                      const Tensor& src,
-                      const Tensor& bias,
-                      const float*  scales,
-                      const int*    en2f,
-                      const int*    f2E,
-                      const float*  dst_scales,
-                      const Tensor* shared_expert_output,
-                      const float*  shared_scales,
-                      int           experts_per_token,
-                      float         bscale,
-                      float         dst_scale,
-                      cudaStream_t  st);
+                       const Tensor& src,
+                       const Tensor& bias,
+                       const float*  scales,
+                       const int*    en2f,
+                       const int*    f2E,
+                       const float*  dst_scales,
+                       int           experts_per_token,
+                       float         bscale,
+                       float         dst_scale,
+                       cudaStream_t  st);
 
 void invokeMoeSoftmaxMaskTopKGroups(
     float* logits, int token_num, int expert_num, int group_size, int top_k, cudaStream_t st);

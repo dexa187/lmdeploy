@@ -1128,8 +1128,6 @@ void invokeMoeCombine(Ref<Tensor>   out_,
                       const int*    en2f,
                       const int*    f2E,
                       const float*  dst_scales,
-                      const Tensor* shared_expert_output,
-                      const float*  shared_scales,
                       int           experts_per_token,
                       float         bscale,
                       float         dst_scale,
@@ -1164,16 +1162,6 @@ void invokeMoeCombine(Ref<Tensor>   out_,
         }
         else {
             invoke(std::false_type{}, t);
-        }
-
-        // Add shared expert contribution if present
-        if (shared_expert_output && shared_scales) {
-            const auto& shared_out = shared_expert_output->get();
-            const int hidden_dim = out.shape(1);
-            const int threads = 256;
-            const int blocks = (tokens * hidden_dim + threads - 1) / threads;
-            kernelAddScaled<T><<<blocks, threads, 0, st>>>(
-                out.data<T>(), shared_out.data<T>(), shared_scales, tokens, hidden_dim);
         }
     };
 

@@ -183,12 +183,6 @@ void MoeFfnLayer::Forward(ForwardParam& p)
                 expert_ffn_->forward({io, io, moe.experts.at(i).get(), p.layer_id});
             }
         }
-
-        // Shared expert computation for naive method
-        if (moe.shared_gate.weight) {
-            auto shared_io = temp_.slice({0, 0}, {tokens, -1});
-            expert_ffn_->forward({shared_io, shared_io, moe.shared_gate.fused_gating_intermediate.data(), p.layer_id});
-        }
     }
     else {
 
@@ -211,12 +205,6 @@ void MoeFfnLayer::Forward(ForwardParam& p)
 
     if (moe.shared_gate.weight) {
         shared_scales_ = Gate(p.input, moe.shared_gate);
-
-        if (param_.method == MoeParam::kFused) {
-            temp_shared_ = Tensor{{tokens, hidden_dim_}, p.input.dtype(), p.input.device()};
-
-            expert_ffn_->forward({temp_shared_, temp_shared_, moe.shared_gate.fused_gating_intermediate.data(), p.layer_id});
-        }
     }
 }
 
@@ -230,8 +218,6 @@ void MoeFfnLayer::Combine(ForwardParam& p)
                      scales_.data(),
                      en2f_.data(),
                      f2E_.data(),
-                     nullptr,
-                     temp_shared_ ? &temp_shared_ : nullptr,
                      shared_scales_.data_or((float*)nullptr),
                      param_.experts_per_token,
                      1.f / tp_size_,
@@ -240,7 +226,6 @@ void MoeFfnLayer::Combine(ForwardParam& p)
     sync_check_cuda_error();
 
     temp_          = {};
-    temp_shared_   = {};
     shared_scales_ = {};
 }
 

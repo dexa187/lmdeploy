@@ -56,7 +56,6 @@ private:
     Buffer_<int>   offsets_;
 
     Tensor         temp_;
-    Tensor         temp_shared_;
     Tensor_<float> shared_scales_;
     ///////////////////////////////////////////////////////
 };
