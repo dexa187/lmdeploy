@@ -37,6 +37,10 @@ SUPPORTED_ARCHS = dict(
     Qwen3_5MoeForConditionalGeneration='qwen3_5-moe',
     # mistral
     MistralForCausalLM='llama',
+    # gemma
+    Gemma2ForCausalLM='llama',
+    GemmaForCausalLM='llama',
+    Gemma4ForCausalLM='llama',
     # llava
     LlavaLlamaForCausalLM='llama',
     LlavaMistralForCausalLM='llama',

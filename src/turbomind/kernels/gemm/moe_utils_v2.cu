@@ -1128,6 +1128,8 @@ void invokeMoeCombine(Ref<Tensor>   out_,
                       const int*    en2f,
                       const int*    f2E,
                       const float*  dst_scales,
+                      const Tensor* shared_expert_output,
+                      const float*  shared_scales,
                       int           experts_per_token,
                       float         bscale,
                       float         dst_scale,
@@ -1158,10 +1160,20 @@ void invokeMoeCombine(Ref<Tensor>   out_,
     auto dispatch_dtype = [&](auto t) {
         if (bias) {
             TM_CHECK_NOTNULL(f2E);
-            return invoke(std::true_type{}, t);
+            invoke(std::true_type{}, t);
         }
         else {
-            return invoke(std::false_type{}, t);
+            invoke(std::false_type{}, t);
+        }
+
+        // Add shared expert contribution if present
+        if (shared_expert_output && shared_scales) {
+            const auto& shared_out = shared_expert_output->get();
+            const int hidden_dim = out.shape(1);
+            const int threads = 256;
+            const int blocks = (tokens * hidden_dim + threads - 1) / threads;
+            kernelAddScaled<T><<<blocks, threads, 0, st>>>(
+                out.data<T>(), shared_out.data<T>(), shared_scales, tokens, hidden_dim);
         }
     };
 
@@ -1330,6 +1342,18 @@ void invokeMoeSoftmaxMaskTopKGroups(
     std::cerr << __FILE__ << "(" << __LINE__ << "): unsupported moe config: expert_num=" << expert_num
               << ", group_size=" << group_size << "\n";
     std::abort();
+}
+
+template<class T>
+__global__ void kernelAddScaled(T* __restrict__ out, const T* __restrict__ shared_out, const float* __restrict__ scales, int tokens, int hidden_dim) {
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+    const int token = i / hidden_dim;
+    if (token < tokens) {
+        const int offset = i % hidden_dim;
+        if (offset < hidden_dim) {
+            out[i] = out[i] + (T)(scales[token]) * shared_out[i];
+        }
+    }
 }
 
 }  // namespace turbomind

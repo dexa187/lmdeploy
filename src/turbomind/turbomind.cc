@@ -72,6 +72,9 @@ static void parse_default_rope_param(const YAML::Node& node, RopeParam& param)
         TM_LOG_ERROR("invalid rope param: base = %f, dim = %d", param.base, param.dim);
         FT_CHECK(0);
     }
+    if (node["partial_factor"]) {
+        param.partial_factor = node["partial_factor"].as<float>();
+    }
 }
 
 static void parse_linear_rope_param(const YAML::Node& node, RopeParam& param)

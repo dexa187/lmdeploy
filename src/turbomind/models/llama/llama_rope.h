@@ -55,6 +55,8 @@ struct RopeParam {
     int   dim;
     float factor;
     int   max_position_embeddings;
+    // p-RoPE support: partial rotation factor (-1 means full rotation)
+    float partial_factor = -1.f;
     // unique
     union {
         YarnRopeParam   yarn;

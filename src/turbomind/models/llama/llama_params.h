@@ -119,6 +119,8 @@ struct AttentionParam {
     // logn attention
     bool use_logn_attn;
     int  max_position_embeddings;
+    // unified KV (K=V weight sharing for heterogeneous head dimensions)
+    bool unified_kv = false;
     // rotary embedding
     RopeParam rope;
 };
