@@ -1318,3 +1318,183 @@ class Qwen3_5ForConditionalGeneration(nn.Module, DeployModelMixinV1, CudaGraphMi
     def get_input_processor(self) -> BaseModelInputProcessor:
         """Get input processor."""
         return self.input_processor
+
+
+class Qwen3_5ForCausalLM(nn.Module, DeployModelMixinV1, CudaGraphMixin):
+    """Text-only Qwen3.5 (e.g. ``model_type==qwen3_5_text``, ``Qwen3_5ForCausalLM``)."""
+
+    packed_modules_mapping = {
+        'qkv_proj': [
+            'q_proj',
+            'k_proj',
+            'v_proj',
+        ],
+        'gate_up_proj': [
+            'gate_proj',
+            'up_proj',
+        ],
+    }
+
+    def __init__(self,
+                 config: PretrainedConfig,
+                 ctx_mgr: StepContextManager,
+                 dtype: torch.dtype | None = None,
+                 device: torch.device | None = None,
+                 prefix: str = ''):
+        super().__init__()
+        self.config = config
+        self.ctx_mgr = ctx_mgr
+
+        self.input_processor = Qwen3_5InputProcessor(self.config)
+
+        self.model = Qwen3_5TextModel(config, dtype=dtype, device=device, prefix=add_prefix('model', prefix))
+        self.lm_head = self.build_lm_head(config.hidden_size,
+                                          config.vocab_size,
+                                          bias=False,
+                                          dtype=dtype,
+                                          device=device)
+        self.enable_return_routed_experts = False
+        self.is_spec_decoding = get_build_model_context().num_spec_tokens > 0
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        past_key_values: list[list[torch.Tensor]],
+        attn_metadata: Any,
+        state_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+        mrope_position_ids: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        """Model forward, return logits."""
+        hidden_states = self.model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            attn_metadata=attn_metadata,
+            state_ids=state_ids,
+            inputs_embeds=inputs_embeds,
+            mrope_position_ids=mrope_position_ids,
+            all_routed_experts=None,
+        )
+        return dict(hidden_states=hidden_states, all_routed_experts=None, target_inputs_embeds=None)
+
+    def get_input_embeddings(self):
+        """Get input embeddings."""
+        return self.model.get_input_embeddings()
+
+    def prepare_inputs_for_generation(
+        self,
+        past_key_values: list[list[torch.Tensor]],
+        inputs_embeds: torch.Tensor | None = None,
+        context: StepContext | None = None,
+    ):
+        """Prepare input."""
+        input_ids = context.input_ids
+        position_ids = context.position_ids
+        attn_metadata = context.attn_metadata
+
+        state_caches = list(cache.transpose(0, 1) for cache in context.state_caches)
+        state_caches = list(zip(state_caches[0], state_caches[1]))
+        past_key_values = list(past_key_values)
+        new_past_key_values = []
+        for layer_type in self.config.layer_types:
+            if layer_type == 'linear_attention':
+                new_past_key_values.append(state_caches.pop(0))
+            elif layer_type == 'full_attention':
+                new_past_key_values.append(past_key_values.pop(0))
+
+        mrope_position_ids = getattr(context, 'mrope_position_ids', None)
+
+        vision_embeddings = context.input_embeddings
+        vision_embedding_indexing = context.input_embedding_indexing
+        if vision_embeddings is not None and len(vision_embeddings) > 0:
+            if inputs_embeds is None:
+                inputs_embeds = self.get_input_embeddings()(input_ids)
+            inputs_embeds[:, vision_embedding_indexing, :] = vision_embeddings.to(inputs_embeds)
+
+        return_input_embeds = self.is_spec_decoding and context.is_chunk_multimodal
+
+        return dict(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=new_past_key_values,
+            attn_metadata=attn_metadata,
+            inputs_embeds=inputs_embeds,
+            state_ids=context.state_offsets,
+            mrope_position_ids=mrope_position_ids,
+            pixel_values=None,
+            vis_cu_seqlens=None,
+            vis_pos_emb=None,
+            image_mask=None,
+            grid_thw=None,
+            pos_embeds=None,
+            return_input_embeds=return_input_embeds,
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        """Load weights."""
+
+        def __skip_layers(name):
+            """We might change the number of layers so we can debug the model
+            with less gpus."""
+            import re
+            if '.layers.' not in name:
+                return False
+            matches = re.findall(r'\.layers\.(\d+)\.', name)
+            layer_id = int(matches[0])
+            return layer_id >= self.config.num_hidden_layers
+
+        stacked_params_mapping = [
+            ('.qkv_proj', '.q_proj', 'q'),
+            ('.qkv_proj', '.k_proj', 'k'),
+            ('.qkv_proj', '.v_proj', 'v'),
+            ('.gate_up_proj', '.gate_proj', 0),
+            ('.gate_up_proj', '.up_proj', 1),
+            ('.in_proj_ba', '.in_proj_b', 'b'),
+            ('.in_proj_ba', '.in_proj_a', 'a'),
+        ]
+
+        rms_norm_keys = ['model.norm', '.input_layernorm', '.post_attention_layernorm', '.q_norm', '.k_norm']
+
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in weights:
+
+            if __skip_layers(name):
+                continue
+
+            if 'mtp.' in name:
+                continue
+            if 'rotary_emb.inv_freq' in name:
+                continue
+            if ('rotary_emb.cos_cached' in name or 'rotary_emb.sin_cached' in name):
+                continue
+            if self.config.tie_word_embeddings and 'lm_head.weight' in name:
+                continue
+
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                load_weight(param, loaded_weight, shard_id=shard_id)
+                break
+            else:
+                if '.qkv.' in name:
+                    param = params_dict[name]
+                    q, k, v = param.weight_spliter(loaded_weight)
+                    load_weight(param, q, shard_id='q')
+                    load_weight(param, k, shard_id='k')
+                    load_weight(param, v, shard_id='v')
+                else:
+                    for rms_norm_key in rms_norm_keys:
+                        if rms_norm_key in name and 'weight' in name:
+                            loaded_weight = loaded_weight + 1
+                            break
+                    param = params_dict[name]
+                    load_weight(param, loaded_weight)
+
+    def get_input_processor(self) -> BaseModelInputProcessor:
+        """Get input processor."""
+        return self.input_processor

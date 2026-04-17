@@ -14,8 +14,11 @@ class Qwen3_5ModelConfigBuilder(AutoModelConfigBuilder):
     @classmethod
     def condition(cls, hf_config):
         """config."""
+        # qwen3_5_text: dense text-only checkpoints (e.g. kai-os/Carnice-27b from Qwen3.5-27B).
         # Qwen 3.6 checkpoints may keep the same HF module names; some releases use qwen3_6* model_type.
-        return hf_config.model_type in ['qwen3_5', 'qwen3_5_moe', 'qwen3_6', 'qwen3_6_moe']
+        return hf_config.model_type in [
+            'qwen3_5', 'qwen3_5_moe', 'qwen3_5_text', 'qwen3_6', 'qwen3_6_moe'
+        ]
 
     @classmethod
     def build(cls,
@@ -27,14 +30,14 @@ class Qwen3_5ModelConfigBuilder(AutoModelConfigBuilder):
               num_spec_tokens: int = 0,
               **kwargs):
         """build."""
-        text_config = hf_config.text_config
+        text_config = getattr(hf_config, 'text_config', None) or hf_config
         # propagate quantization_config from top-level hf_config into text_config
         quantization_config = getattr(hf_config, 'quantization_config', None)
         if quantization_config is not None and not hasattr(text_config, 'quantization_config'):
             text_config.quantization_config = quantization_config
         cfg = DefaultModelConfigBuilder.build(text_config, model_path, tp=tp, **kwargs)
 
-        if getattr(hf_config.text_config, 'attn_output_gate', False):
+        if getattr(text_config, 'attn_output_gate', False):
             cfg.num_attention_heads *= 2
         # update num layers
         num_layers = cfg.num_layers

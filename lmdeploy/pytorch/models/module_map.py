@@ -178,6 +178,8 @@ MODULE_MAP.update({
 MODULE_MAP.update({
     'Qwen3_5ForConditionalGeneration':
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.qwen3_5.Qwen3_5ForConditionalGeneration',
+    'Qwen3_5ForCausalLM':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.qwen3_5.Qwen3_5ForCausalLM',
 })
 
 # qwen3.5 moe
