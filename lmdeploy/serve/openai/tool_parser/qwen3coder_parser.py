@@ -23,18 +23,34 @@ from .tool_parser import ToolParser, ToolParserManager
 logger = get_logger('lmdeploy')
 
 
-def _parse_tool_call_arguments_dict(arguments: Any) -> dict[str, Any] | None:
-    """Return dict-like tool arguments for Qwen3Coder request rendering."""
-    if not isinstance(arguments, str):
-        return None
+def _coerce_function_arguments_to_mapping(arguments: Any) -> dict[str, Any]:
+    """Return a mapping for HuggingFace chat templates.
 
-    try:
-        parsed_arguments = json.loads(arguments)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if isinstance(parsed_arguments, dict):
-        return parsed_arguments
-    return None
+    Qwen3-Coder templates iterate ``tool_call.arguments|items``; OpenAI clients
+    usually send ``arguments`` as a JSON string, which breaks Jinja unless
+    coerced to a dict.
+    """
+    if arguments is None:
+        return {}
+    if isinstance(arguments, dict):
+        return dict(arguments)
+    if isinstance(arguments, list):
+        return {str(i): v for i, v in enumerate(arguments)}
+    if isinstance(arguments, str):
+        stripped = arguments.strip()
+        if not stripped:
+            return {}
+        try:
+            parsed = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug('tool call arguments are not valid JSON; using empty dict for chat template')
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {str(i): v for i, v in enumerate(parsed)}
+        return {'value': parsed}
+    return {'value': arguments}
 
 
 @dataclass
@@ -86,25 +102,25 @@ class Qwen3CoderToolParser(ToolParser):
                 if not isinstance(tool_call, dict):
                     continue
                 function = tool_call.get('function')
-                if not isinstance(function, dict) or isinstance(function.get('arguments'), dict):
+                if not isinstance(function, dict):
+                    continue
+                if isinstance(function.get('arguments'), dict):
                     continue
 
-                parsed_arguments = _parse_tool_call_arguments_dict(function.get('arguments'))
-                if parsed_arguments is None:
-                    continue
+                coerced = _coerce_function_arguments_to_mapping(function.get('arguments'))
 
                 if normalized_messages is None:
                     normalized_messages = list(messages)
                 if normalized_tool_calls is None:
                     normalized_tool_calls = list(tool_calls)
-                    normalized_message = dict(message)
+                    normalized_message = dict(normalized_messages[msg_idx])
                     normalized_message['tool_calls'] = normalized_tool_calls
                     normalized_messages[msg_idx] = normalized_message
 
                 normalized_function = dict(function)
-                normalized_function['arguments'] = parsed_arguments
+                normalized_function['arguments'] = coerced
 
-                normalized_tool_call = dict(tool_call)
+                normalized_tool_call = dict(normalized_tool_calls[tool_idx])
                 normalized_tool_call['function'] = normalized_function
                 normalized_tool_calls[tool_idx] = normalized_tool_call
 

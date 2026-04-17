@@ -296,8 +296,21 @@ def test_adjust_request_parses_assistant_tool_call_object_arguments():
     assert request.messages[1]['tool_calls'][0]['function']['arguments'] == '{"city": "Paris", "units": "metric"}'
 
 
-@pytest.mark.parametrize('arguments', ['[1, 2, 3]', '1', '{not valid json}'])
-def test_adjust_request_leaves_non_mapping_arguments_unchanged(arguments):
+@pytest.mark.parametrize(
+    ('arguments', 'expected'),
+    [
+        ('[1, 2, 3]', {
+            '0': 1,
+            '1': 2,
+            '2': 3
+        }),
+        ('1', {
+            'value': 1
+        }),
+        ('{not valid json}', {}),
+    ],
+)
+def test_adjust_request_coerces_string_arguments_for_hf_template(arguments, expected):
     parser = Qwen3CoderToolParser(tokenizer=DummyTokenizer())
     request = ChatCompletionRequest(model='qwen3coder',
                                     messages=[{
@@ -315,7 +328,8 @@ def test_adjust_request_leaves_non_mapping_arguments_unchanged(arguments):
 
     adjusted_request = parser.adjust_request(request)
 
-    assert adjusted_request is request
+    assert adjusted_request is not request
+    assert adjusted_request.messages[0]['tool_calls'][0]['function']['arguments'] == expected
 
 
 def test_adjust_request_noops_for_string_messages():

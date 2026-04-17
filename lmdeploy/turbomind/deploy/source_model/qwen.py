@@ -447,6 +447,8 @@ class Qwen3_5MoeReader(Qwen3_5ReaderMixin, Qwen3MoeReader):
 
 @INPUT_MODELS.register_module(name='qwen3_5-moe')
 class Qwen3_5MoeModel(Qwen3MoeModel):
+    """Qwen3.5 / Qwen3.6 MoE VLMs (e.g. Qwen3_5MoeForConditionalGeneration, Qwen3.6-35B-A3B)."""
+
     Reader = Qwen3_5MoeReader
 
     @staticmethod

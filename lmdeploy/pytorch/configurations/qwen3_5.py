@@ -14,7 +14,8 @@ class Qwen3_5ModelConfigBuilder(AutoModelConfigBuilder):
     @classmethod
     def condition(cls, hf_config):
         """config."""
-        return hf_config.model_type in ['qwen3_5', 'qwen3_5_moe']
+        # Qwen 3.6 checkpoints may keep the same HF module names; some releases use qwen3_6* model_type.
+        return hf_config.model_type in ['qwen3_5', 'qwen3_5_moe', 'qwen3_6', 'qwen3_6_moe']
 
     @classmethod
     def build(cls,
