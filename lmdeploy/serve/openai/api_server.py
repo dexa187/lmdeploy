@@ -598,8 +598,10 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
                         delta_token_ids=delta_token_ids,
                         request=request)
                     if tool_delta is not None:
-                        delta_message.tool_calls = tool_delta.tool_calls
-                        delta_message.content = tool_delta.content
+                        if isinstance(tool_delta.tool_calls, list) and len(tool_delta.tool_calls) > 0:
+                            delta_message.tool_calls = tool_delta.tool_calls
+                        if tool_delta.content is not None:
+                            delta_message.content = tool_delta.content
                         if isinstance(tool_delta.tool_calls, list) and len(tool_delta.tool_calls):
                             streaming_tools = True
                 elif (request.tool_choice != 'none' and request.tools is not None

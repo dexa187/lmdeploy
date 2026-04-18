@@ -23,6 +23,27 @@ from .tool_parser import ToolParser, ToolParserManager
 logger = get_logger('lmdeploy')
 
 
+def _escape_json_string_inner(raw: str) -> str:
+    """Escape text for use inside a JSON string literal (no outer quotes)."""
+    out: list[str] = []
+    for ch in raw:
+        if ch == '\\':
+            out.append('\\\\')
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\r':
+            out.append('\\r')
+        elif ch == '\t':
+            out.append('\\t')
+        elif ord(ch) < 0x20:
+            out.append(f'\\u{ord(ch):04x}')
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
 def _coerce_function_arguments_to_mapping(arguments: Any) -> dict[str, Any]:
     """Return a mapping for HuggingFace chat templates.
 
@@ -60,10 +81,13 @@ class ParserState:
     current_index: int = -1  # Index of the current tool call
 
     id: str = ''  # ID of the current tool call
+    # Cumulative ``arguments`` JSON prefix already sent to the client (OpenAI concat semantics).
+    arguments_buffer: str = ''
 
     def reset_tool_call(self):
         """Called when `</tool_call>` finish tag occurred."""
         self.id = ''
+        self.arguments_buffer = ''
 
 
 @ToolParserManager.register_module(['qwen3coder'])
@@ -205,6 +229,91 @@ class Qwen3CoderToolParser(ToolParser):
         is_func_closed = self.func_end_token in content
         return func_name, args_dict, is_func_closed
 
+    def _inner_from_tool_block(self, tool_content: str) -> str:
+        return tool_content.replace(self.tool_start_token, '').replace(self.tool_end_token, '').strip()
+
+    def _parse_value_string(self, param_val_str: str) -> Any:
+        if param_val_str.lower() == 'null':
+            return None
+        if param_val_str.lower() == 'true':
+            return True
+        if param_val_str.lower() == 'false':
+            return False
+        try:
+            return json.loads(param_val_str)
+        except json.JSONDecodeError:
+            return param_val_str
+
+    def _parse_progressive_params(
+            self, tool_content: str) -> tuple[str | None, dict[str, Any], tuple[str, str] | None, bool]:
+        """Parse closed parameters and optionally one open streaming parameter."""
+        content = self._inner_from_tool_block(tool_content)
+
+        func_name = None
+        func_start = content.find(self.func_prefix)
+        if func_start != -1:
+            name_start = func_start + len(self.func_prefix)
+            terminators = [idx for idx in (content.find('>', name_start), content.find('\n', name_start)) if idx != -1]
+            if terminators:
+                func_name = content[name_start:min(terminators)].strip()
+
+        args_complete: dict[str, Any] = {}
+        stream: tuple[str, str] | None = None
+        search_idx = 0
+        while True:
+            param_start = content.find(self.param_prefix, search_idx)
+            if param_start == -1:
+                break
+
+            name_start = param_start + len(self.param_prefix)
+            terminators = [idx for idx in (content.find('>', name_start), content.find('\n', name_start)) if idx != -1]
+            if not terminators:
+                break
+
+            name_end = min(terminators)
+            param_name = content[name_start:name_end].strip()
+
+            val_start = name_end + 1
+            val_end = content.find(self.param_end_token, val_start)
+            if val_end == -1:
+                stream = (param_name, content[val_start:])
+                break
+
+            param_val_str = content[val_start:val_end].strip()
+            args_complete[param_name] = self._parse_value_string(param_val_str)
+            search_idx = val_end + len(self.param_end_token)
+
+        is_func_closed = self.func_end_token in content
+        return func_name, args_complete, stream, is_func_closed
+
+    def _arguments_json_target(self, complete: dict[str, Any], stream: tuple[str, str] | None,
+                               is_func_closed: bool) -> str:
+        """Build the canonical OpenAI ``arguments`` string prefix for the current parse state.
+
+        Extensions are strictly suffix-only so streamed deltas concatenate to valid final JSON.
+        """
+        if not complete and stream is None and not is_func_closed:
+            return ''
+        parts: list[str] = ['{']
+        sep = ''
+        for k, v in complete.items():
+            parts.append(sep)
+            parts.append(json.dumps(k, ensure_ascii=False))
+            parts.append(':')
+            parts.append(json.dumps(v, ensure_ascii=False))
+            sep = ','
+        if stream is not None:
+            sn, sv = stream
+            parts.append(sep)
+            parts.append(json.dumps(sn, ensure_ascii=False))
+            parts.append(':"')
+            parts.append(_escape_json_string_inner(sv))
+        if is_func_closed:
+            if stream is not None:
+                parts.append('"')
+            parts.append('}')
+        return ''.join(parts)
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -233,11 +342,9 @@ class Qwen3CoderToolParser(ToolParser):
                 parser_state.id = f'chatcmpl-tool-{shortuuid.random()}'
                 parser_state.current_index += 1
                 parser_state.has_emitted_name = False
-                parser_state.has_emitted_json_start = False
-                parser_state.json_closed = False
-                parser_state.emitted_params = set()
+                parser_state.arguments_buffer = ''
 
-            func_name, args_dict, is_func_closed = self._extract_params(tool_content)
+            func_name, complete, stream_pair, is_func_closed = self._parse_progressive_params(tool_content)
 
             fcall_delta = DeltaFunctionCall()
             has_updates = False
@@ -247,27 +354,15 @@ class Qwen3CoderToolParser(ToolParser):
                 parser_state.has_emitted_name = True
                 has_updates = True
 
-            json_fragments = []
-            if not getattr(parser_state, 'has_emitted_json_start', False):
-                if args_dict or is_func_closed:
-                    json_fragments.append('{')
-                    parser_state.has_emitted_json_start = True
-
-            for k, v in args_dict.items():
-                if k not in parser_state.emitted_params:
-                    prefix = ', ' if len(parser_state.emitted_params) > 0 else ''
-                    serialized = json.dumps(v, ensure_ascii=False)
-                    json_fragments.append(f'{prefix}"{k}": {serialized}')
-                    parser_state.emitted_params.add(k)
-
-            if is_func_closed and not getattr(parser_state, 'json_closed', False):
-                if getattr(parser_state, 'has_emitted_json_start', False):
-                    json_fragments.append('}')
-                    parser_state.json_closed = True
-
-            joined_fragments = ''.join(json_fragments)
-            if joined_fragments:
-                fcall_delta.arguments = joined_fragments
+            target = self._arguments_json_target(complete, stream_pair, is_func_closed)
+            buf = parser_state.arguments_buffer
+            if not target.startswith(buf):
+                logger.warning('tool arguments snapshot regressed; resyncing stream buffer')
+                buf = ''
+            suffix = target[len(buf):]
+            parser_state.arguments_buffer = buf + suffix
+            if suffix:
+                fcall_delta.arguments = suffix
                 has_updates = True
 
             if has_updates:
@@ -280,13 +375,12 @@ class Qwen3CoderToolParser(ToolParser):
 
         if has_tool_end:
             parser_state.reset_tool_call()
-            # Prepare for the next tool call
             if hasattr(parser_state, 'has_emitted_name'):
                 delattr(parser_state, 'has_emitted_name')
-                delattr(parser_state, 'has_emitted_json_start')
-                delattr(parser_state, 'json_closed')
-                delattr(parser_state, 'emitted_params')
 
+        has_any = (delta.content is not None) or (len(delta.tool_calls) > 0)
+        if not has_any:
+            return None
         return delta
 
     def extract_tool_calls(
