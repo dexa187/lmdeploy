@@ -121,8 +121,6 @@ def check_vl_llm(backend: str, config: dict) -> bool:
         return True
     elif arch in ['ChatGLMModel', 'ChatGLMForConditionalGeneration'] and 'vision_config' in config:
         return True
-    elif arch in ['Qwen3_5ForConditionalGeneration', 'Qwen3_5MoeForConditionalGeneration'] and backend == 'turbomind':
-        return False
     elif arch in supported_archs:
         return True
     return False

@@ -56,7 +56,7 @@
 ```{note}
 * [1] turbomind 引擎不支持 window attention。所以，对于应用了 window attention，并开启了对应的开关"use_sliding_window"的模型，比如 Mistral、Qwen1.5 等，在推理时，请选择 pytorch engine
 * [2] 当模型的 head_dim 非 128 时，turbomind 不支持它的 kv cache 4/8 bit 量化和推理。比如，llama3.2-1B，qwen2-0.5B，internvl2-1B 等等
-* [3] turbomind 目前暂不支持 Qwen3.5 系列的视觉编码器。
+* [3] 在 TurboMind 路径下，Qwen3.5 / Qwen3.6 的视觉编码在 PyTorch 中运行（加载 Hugging Face 视觉权重），再将多模态嵌入送入 TurboMind 语言模型；若需要单引擎端到端推理，请使用 PyTorch 后端。
 ```
 
 ## PyTorchEngine CUDA 平台

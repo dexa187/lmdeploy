@@ -33,7 +33,7 @@ SUPPORTED_ARCHS = dict(
     Qwen3ForCausalLM='qwen3',
     Qwen3MoeForCausalLM='qwen3-moe',
     # Qwen 3.5 / Qwen 3.6 (e.g. Qwen3.6-35B-A3B): HF uses the same class names and
-    # TurboMind input model keys as Qwen 3.5; vision encoder is not used by TurboMind.
+    # TurboMind input model keys as Qwen 3.5; vision runs in Python (HF) and feeds TM.
     Qwen3_5ForConditionalGeneration='qwen3_5',
     # Text-only Qwen3.5 (model_type qwen3_5_text), e.g. kai-os/Carnice-27b
     Qwen3_5ForCausalLM='qwen3_5',

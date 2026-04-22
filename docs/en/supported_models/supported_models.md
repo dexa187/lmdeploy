@@ -55,7 +55,7 @@ The following tables detail the models supported by LMDeploy's TurboMind engine 
 ```{note}
 * [1] The TurboMind engine doesn't support window attention. Therefore, for models that have applied window attention and have the corresponding switch "use_sliding_window" enabled, such as Mistral, Qwen1.5 and etc., please choose the PyTorch engine for inference.
 * [2] When the head_dim of a model is not 128, such as llama3.2-1B, qwen2-0.5B and internvl2-1B, turbomind doesn't support its kv cache 4/8 bit quantization and inference
-* [3] TurboMind does not currently support the vision encoder for the Qwen3.5 series.
+* [3] For TurboMind, Qwen3.5 / Qwen3.6 vision runs in PyTorch (Hugging Face vision weights) and multimodal embeddings are passed to the TurboMind language model; use the PyTorch backend if you need the full model fused in one engine.
 ```
 
 ## PyTorchEngine on CUDA Platform
