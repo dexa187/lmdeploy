@@ -70,6 +70,7 @@ class Qwen3_5Model(Qwen3VLModel):
             self._hf_full_model = full
             wrap = type('Qwen35VisionWrapper', (), {})()
             wrap.visual = full.model.visual
+            wrap.visual.eval()
             self.model = wrap
             return
 
@@ -108,7 +109,8 @@ class Qwen3_5Model(Qwen3VLModel):
             )
         wrap = type('Qwen35VisionWrapper', (), {})()
         wrap.visual = shell.model.visual
-        self.model = wrap.eval()
+        wrap.visual.eval()
+        self.model = wrap
 
     @torch.no_grad()
     def forward(self, messages: list[dict], max_batch_size: int = 1) -> list[dict]:
