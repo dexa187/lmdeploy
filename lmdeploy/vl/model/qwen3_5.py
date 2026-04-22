@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
+import torch.nn as nn
 from transformers import AutoProcessor
 
 from lmdeploy.vl.constants import Modality
@@ -46,19 +47,25 @@ class Qwen3_5Model(Qwen3VLModel):
         check_transformers()
         arch = self.hf_config.architectures[0]
         if arch == 'Qwen3_5ForConditionalGeneration':
-            from transformers import Qwen3_5ForConditionalGeneration as AutoModelCls
+            from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5VisionModel
 
             no_split_module_classes = ['Qwen3_5VisionBlock']
+            vision_model_cls = Qwen3_5VisionModel
         elif arch == 'Qwen3_5MoeForConditionalGeneration':
-            from transformers import Qwen3_5MoeForConditionalGeneration as AutoModelCls
+            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeVisionModel
 
             no_split_module_classes = ['Qwen3_5MoeVisionBlock']
+            vision_model_cls = Qwen3_5MoeVisionModel
         else:
             raise ValueError(f'Unsupported arch={arch}')
 
         from accelerate import init_empty_weights
 
         if self.with_llm:
+            if arch == 'Qwen3_5ForConditionalGeneration':
+                from transformers import Qwen3_5ForConditionalGeneration as AutoModelCls
+            else:
+                from transformers import Qwen3_5MoeForConditionalGeneration as AutoModelCls
             full = AutoModelCls.from_pretrained(self.model_path, device_map='cpu')
             self._hf_full_model = full
             wrap = type('Qwen35VisionWrapper', (), {})()
@@ -66,36 +73,42 @@ class Qwen3_5Model(Qwen3VLModel):
             self.model = wrap
             return
 
-        with init_empty_weights():
-            config = self.hf_config
-            if hasattr(config, 'text_config'):
-                config.text_config.tie_word_embeddings = False
-            if hasattr(config, 'tie_word_embeddings'):
-                config.tie_word_embeddings = False
-            model = AutoModelCls._from_config(config)
-            model.visual = model.model.visual
-            del model.model
-            del model.lm_head
-
+        # Checkpoints use keys ``model.visual.*``. Hoisting to top-level ``visual.*`` leaves weights on
+        # meta and breaks accelerate; keep ``model.visual`` for loading, then expose ``.visual``.
+        vision_cfg = self.hf_config.vision_config
         target_dtype = torch.float16
-        if hasattr(self.hf_config, 'torch_dtype') and self.hf_config.torch_dtype is not None:
-            target_dtype = self.hf_config.torch_dtype
-            if isinstance(target_dtype, str):
-                target_dtype = getattr(torch, target_dtype.split('.')[-1])
-        model = model.to(dtype=target_dtype)
+        td = getattr(self.hf_config, 'torch_dtype', None)
+        if td is not None:
+            if isinstance(td, str):
+                td = getattr(torch, td.rsplit('.', maxsplit=1)[-1])
+            if td == torch.bfloat16:
+                target_dtype = torch.bfloat16
+
+        with init_empty_weights():
+            visual = vision_model_cls._from_config(vision_cfg)
+            shell = nn.Module()
+            inner = nn.Module()
+            inner.add_module('visual', visual)
+            shell.add_module('model', inner)
+            if target_dtype == torch.bfloat16:
+                shell.bfloat16()
+            else:
+                shell.half()
 
         from accelerate import load_checkpoint_and_dispatch
 
         with disable_logging():
             load_checkpoint_and_dispatch(
-                model=model,
+                model=shell,
                 checkpoint=self.model_path,
                 device_map='auto',
                 max_memory=self.max_memory,
                 no_split_module_classes=no_split_module_classes,
                 dtype=target_dtype,
             )
-        self.model = model.eval()
+        wrap = type('Qwen35VisionWrapper', (), {})()
+        wrap.visual = shell.model.visual
+        self.model = wrap.eval()
 
     @torch.no_grad()
     def forward(self, messages: list[dict], max_batch_size: int = 1) -> list[dict]:
