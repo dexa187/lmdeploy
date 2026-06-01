@@ -598,18 +598,10 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
                         delta_token_ids=delta_token_ids,
                         request=request)
                     if tool_delta is not None:
-                        if isinstance(tool_delta.tool_calls, list) and len(tool_delta.tool_calls) > 0:
-                            delta_message.tool_calls = tool_delta.tool_calls
-                        if tool_delta.content is not None:
-                            delta_message.content = tool_delta.content
-                        elif isinstance(tool_delta.tool_calls, list) and len(tool_delta.tool_calls) > 0:
-                            delta_message.content = None
+                        delta_message.tool_calls = tool_delta.tool_calls
+                        delta_message.content = tool_delta.content
                         if isinstance(tool_delta.tool_calls, list) and len(tool_delta.tool_calls):
                             streaming_tools = True
-                    else:
-                        parser_state = getattr(request, '_tool_parser_state', None)
-                        if parser_state is not None and getattr(parser_state, 'inside_tool_call', False):
-                            delta_message.content = None
                 elif (request.tool_choice != 'none' and request.tools is not None
                       and VariableInterface.tool_parser is None):
                     logger.error('Please launch the api_server with --tool-call-parser if you want to use tool.')
