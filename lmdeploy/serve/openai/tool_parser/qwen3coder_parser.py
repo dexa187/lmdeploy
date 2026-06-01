@@ -83,11 +83,14 @@ class ParserState:
     id: str = ''  # ID of the current tool call
     # Cumulative ``arguments`` JSON prefix already sent to the client (OpenAI concat semantics).
     arguments_buffer: str = ''
+    # True while an incomplete ``<tool_call>`` block is being streamed (no closing tag yet).
+    inside_tool_call: bool = False
 
     def reset_tool_call(self):
         """Called when `</tool_call>` finish tag occurred."""
         self.id = ''
         self.arguments_buffer = ''
+        self.inside_tool_call = False
 
 
 @ToolParserManager.register_module(['qwen3coder'])
@@ -160,6 +163,21 @@ class Qwen3CoderToolParser(ToolParser):
             return request
         return request.model_copy(update={'messages': normalized_messages})
 
+    def _find_tool_block_end(self, parsing_content: str, start_idx: int) -> int | None:
+        """Return the index of ``</tool_call>`` only after ``</function>``.
+
+        Parameter values may contain ``</tool_call>`` as plain text; requiring
+        ``</function>`` first avoids closing the block too early.
+        """
+        search_from = start_idx + len(self.tool_start_token)
+        func_end = parsing_content.find(self.func_end_token, search_from)
+        if func_end == -1:
+            return None
+        end_idx = parsing_content.find(self.tool_end_token, func_end + len(self.func_end_token))
+        if end_idx == -1:
+            return None
+        return end_idx
+
     def _split(self, parser_state: ParserState, parsing_content: str) -> tuple[str, str, bool]:
         """Split content into tuple: (text_content, tool_content, has_tool_end)"""
         try:
@@ -169,13 +187,14 @@ class Qwen3CoderToolParser(ToolParser):
             parser_state.position += len(parsing_content)
             return parsing_content, '', False
 
-        try:
-            end_idx = parsing_content.index(self.tool_end_token)
-        except ValueError:
+        end_idx = self._find_tool_block_end(parsing_content, start_idx)
+        if end_idx is None:
+            parser_state.inside_tool_call = True
             return parsing_content[:start_idx], parsing_content[start_idx:], False
 
         rem = end_idx - start_idx
         parser_state.position += rem + len(self.tool_end_token)
+        parser_state.inside_tool_call = False
         return parsing_content[:start_idx], parsing_content[start_idx:end_idx + len(self.tool_end_token)], True
 
     def _extract_params(self, content: str) -> tuple[str | None, dict[str, Any], bool]:
@@ -314,6 +333,62 @@ class Qwen3CoderToolParser(ToolParser):
             parts.append('}')
         return ''.join(parts)
 
+    def _emit_tool_delta(self, parser_state: ParserState, fcall_delta: DeltaFunctionCall) -> DeltaToolCall:
+        if not parser_state.id:
+            parser_state.id = f'chatcmpl-tool-{shortuuid.random()}'
+            parser_state.current_index += 1
+        return DeltaToolCall(
+            id=parser_state.id,
+            index=parser_state.current_index,
+            function=fcall_delta,
+        )
+
+    def _process_tool_block(
+        self,
+        parser_state: ParserState,
+        tool_content: str,
+        has_tool_end: bool,
+    ) -> DeltaToolCall | None:
+        func_name, complete, stream_pair, is_func_closed = self._parse_progressive_params(tool_content)
+
+        fcall_delta = DeltaFunctionCall()
+        has_updates = False
+
+        if func_name and not getattr(parser_state, 'has_emitted_name', False):
+            fcall_delta.name = func_name
+            parser_state.has_emitted_name = True
+            has_updates = True
+
+        target = self._arguments_json_target(complete, stream_pair, is_func_closed)
+        buf = parser_state.arguments_buffer
+        if not target.startswith(buf):
+            logger.warning('tool arguments snapshot regressed; resyncing stream buffer')
+            buf = ''
+        suffix = target[len(buf):]
+        parser_state.arguments_buffer = buf + suffix
+        if suffix:
+            fcall_delta.arguments = suffix
+            has_updates = True
+
+        if has_tool_end and not has_updates:
+            if not getattr(parser_state, 'has_emitted_name', False) and not parser_state.arguments_buffer:
+                parser_state.reset_tool_call()
+                if hasattr(parser_state, 'has_emitted_name'):
+                    delattr(parser_state, 'has_emitted_name')
+            return None
+
+        if not has_updates:
+            return None
+
+        tool_delta = self._emit_tool_delta(parser_state, fcall_delta)
+
+        if has_tool_end:
+            parser_state.reset_tool_call()
+            if hasattr(parser_state, 'has_emitted_name'):
+                delattr(parser_state, 'has_emitted_name')
+
+        return tool_delta
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -330,53 +405,35 @@ class Qwen3CoderToolParser(ToolParser):
             parser_state = ParserState()
             setattr(request, '_tool_parser_state', parser_state)
 
-        split_result = self._split(parser_state, current_text[parser_state.position:])
-        text_content, tool_content, has_tool_end = split_result
-
         delta = DeltaMessage()
-        if text_content:
-            delta.content = text_content
+        text_parts: list[str] = []
+        tool_deltas: list[DeltaToolCall] = []
 
-        if tool_content:
+        while parser_state.position < len(current_text):
+            split_result = self._split(parser_state, current_text[parser_state.position:])
+            text_content, tool_content, has_tool_end = split_result
+
+            if text_content:
+                text_parts.append(text_content)
+
+            if not tool_content:
+                break
+
             if not parser_state.id:
-                parser_state.id = f'chatcmpl-tool-{shortuuid.random()}'
-                parser_state.current_index += 1
-                parser_state.has_emitted_name = False
                 parser_state.arguments_buffer = ''
+                parser_state.has_emitted_name = False
 
-            func_name, complete, stream_pair, is_func_closed = self._parse_progressive_params(tool_content)
+            tool_delta = self._process_tool_block(parser_state, tool_content, has_tool_end)
+            if tool_delta is not None:
+                tool_deltas.append(tool_delta)
 
-            fcall_delta = DeltaFunctionCall()
-            has_updates = False
+            if not has_tool_end:
+                break
 
-            if func_name and not getattr(parser_state, 'has_emitted_name', False):
-                fcall_delta.name = func_name
-                parser_state.has_emitted_name = True
-                has_updates = True
-
-            target = self._arguments_json_target(complete, stream_pair, is_func_closed)
-            buf = parser_state.arguments_buffer
-            if not target.startswith(buf):
-                logger.warning('tool arguments snapshot regressed; resyncing stream buffer')
-                buf = ''
-            suffix = target[len(buf):]
-            parser_state.arguments_buffer = buf + suffix
-            if suffix:
-                fcall_delta.arguments = suffix
-                has_updates = True
-
-            if has_updates:
-                parsed_delta = DeltaToolCall(
-                    id=parser_state.id,
-                    index=parser_state.current_index,
-                    function=fcall_delta,
-                )
-                delta.tool_calls = [parsed_delta]
-
-        if has_tool_end:
-            parser_state.reset_tool_call()
-            if hasattr(parser_state, 'has_emitted_name'):
-                delattr(parser_state, 'has_emitted_name')
+        if text_parts:
+            delta.content = ''.join(text_parts)
+        if tool_deltas:
+            delta.tool_calls = tool_deltas
 
         has_any = (delta.content is not None) or (len(delta.tool_calls) > 0)
         if not has_any:
@@ -400,10 +457,10 @@ class Qwen3CoderToolParser(ToolParser):
             tool_content = match.group(1)
             func_name, args_dict, _ = self._extract_params(tool_content)
 
-            if func_name:
+            if func_name and args_dict:
                 tool_calls.append(
                     ToolCall(function=FunctionCall(
-                        name=func_name, arguments=json.dumps(args_dict, ensure_ascii=False) if args_dict else '{}')))
+                        name=func_name, arguments=json.dumps(args_dict, ensure_ascii=False))))
 
         if scan_pos < len(text):
             buf.append(text[scan_pos:])

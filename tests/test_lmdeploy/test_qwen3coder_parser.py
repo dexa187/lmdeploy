@@ -424,3 +424,43 @@ def test_adjust_request_renders_qwen_template_from_string_payload(model_path):
     assert '<function=get_weather>' in prompt
     assert '<parameter=city>\nParis\n</parameter>' in prompt
     assert '<parameter=units>\nmetric\n</parameter>' in prompt
+
+
+def test_stream_ignores_tool_call_close_inside_parameter_value():
+    """``</tool_call>`` inside a parameter must not end the block early."""
+    tokenizer = DummyTokenizer()
+    parser = Qwen3CoderToolParser(tokenizer=tokenizer)
+    request = ChatCompletionRequest(model='qwen3coder', messages=[], stream=True)
+    text_sequence = [
+        '<tool_call>\n<function=write_file>\n',
+        '<parameter=path>out.txt</parameter>\n',
+        '<parameter=content>',
+        'note: </tool_call> is not a real close tag',
+        '</parameter>\n',
+        '</function>\n',
+        '</tool_call>',
+    ]
+    content, _, tool_calls = _stream_parse(request, text_sequence)
+    assert len(tool_calls) == 1
+    args = json.loads(tool_calls[0].function.arguments)
+    assert args['path'] == 'out.txt'
+    assert '</tool_call>' in args['content']
+    assert content.strip() == ''
+
+
+def test_nonstream_skips_empty_tool_calls():
+    tokenizer = DummyTokenizer()
+    parser = Qwen3CoderToolParser(tokenizer=tokenizer)
+    text = (
+        'done\n'
+        '<tool_call>\n<function=read_storage_file>\n'
+        '<parameter=fileName>a.txt</parameter>\n'
+        '</function>\n</tool_call>\n'
+        '<tool_call>\n<function=read_storage_file>\n</function>\n</tool_call>\n'
+        '<tool_call>\n<function=read_storage_file>\n</function>\n</tool_call>'
+    )
+    info = parser.extract_tool_calls(text, request=ChatCompletionRequest(model='qwen3coder', messages=[]))
+    assert len(info.tool_calls) == 1
+    assert info.tool_calls[0].function.name == 'read_storage_file'
+    assert json.loads(info.tool_calls[0].function.arguments) == {'fileName': 'a.txt'}
+    assert info.content.strip() == 'done'
