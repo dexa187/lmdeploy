@@ -248,8 +248,40 @@ class Qwen3CoderToolParser(ToolParser):
         is_func_closed = self.func_end_token in content
         return func_name, args_dict, is_func_closed
 
-    def _inner_from_tool_block(self, tool_content: str) -> str:
-        return tool_content.replace(self.tool_start_token, '').replace(self.tool_end_token, '').strip()
+    def _inner_from_tool_block(self, tool_content: str, strip_trailing_close: bool = True) -> str:
+        """Strip only the outer ``<tool_call>``/``</tool_call>`` wrappers.
+
+        Parameter values may legitimately contain those literal substrings, so a
+        blanket ``replace`` would corrupt them. The trailing ``</tool_call>`` is
+        only the wrapper when the block is actually closed; while streaming an
+        open block, a trailing ``</tool_call>`` is literal content and must be
+        preserved.
+        """
+        s = tool_content
+        if s.startswith(self.tool_start_token):
+            s = s[len(self.tool_start_token):]
+        if strip_trailing_close:
+            trimmed = s.rstrip()
+            if trimmed.endswith(self.tool_end_token):
+                s = trimmed[:-len(self.tool_end_token)]
+        return s.strip()
+
+    def _safe_stream_value(self, raw: str) -> str:
+        """Return the portion of an open parameter value that is safe to stream.
+
+        Trailing characters that could be the start of ``</parameter>`` are held
+        back so we never emit text that must later be retracted (which would
+        corrupt the monotonic ``arguments`` stream). Leading/trailing whitespace
+        is dropped to match the stripped value produced once the tag closes.
+        """
+        v = raw.lstrip()
+        end = self.param_end_token
+        max_hold = min(len(v), len(end))
+        for k in range(max_hold, 0, -1):
+            if v.endswith(end[:k]):
+                v = v[:-k]
+                break
+        return v.rstrip()
 
     def _parse_value_string(self, param_val_str: str) -> Any:
         if param_val_str.lower() == 'null':
@@ -264,9 +296,11 @@ class Qwen3CoderToolParser(ToolParser):
             return param_val_str
 
     def _parse_progressive_params(
-            self, tool_content: str) -> tuple[str | None, dict[str, Any], tuple[str, str] | None, bool]:
+            self,
+            tool_content: str,
+            is_block_closed: bool = True) -> tuple[str | None, dict[str, Any], tuple[str, str] | None, bool]:
         """Parse closed parameters and optionally one open streaming parameter."""
-        content = self._inner_from_tool_block(tool_content)
+        content = self._inner_from_tool_block(tool_content, strip_trailing_close=is_block_closed)
 
         func_name = None
         func_start = content.find(self.func_prefix)
@@ -295,7 +329,7 @@ class Qwen3CoderToolParser(ToolParser):
             val_start = name_end + 1
             val_end = content.find(self.param_end_token, val_start)
             if val_end == -1:
-                stream = (param_name, content[val_start:])
+                stream = (param_name, self._safe_stream_value(content[val_start:]))
                 break
 
             param_val_str = content[val_start:val_end].strip()
@@ -349,7 +383,8 @@ class Qwen3CoderToolParser(ToolParser):
         tool_content: str,
         has_tool_end: bool,
     ) -> DeltaToolCall | None:
-        func_name, complete, stream_pair, is_func_closed = self._parse_progressive_params(tool_content)
+        func_name, complete, stream_pair, is_func_closed = self._parse_progressive_params(
+            tool_content, is_block_closed=has_tool_end)
 
         fcall_delta = DeltaFunctionCall()
         has_updates = False
@@ -370,19 +405,12 @@ class Qwen3CoderToolParser(ToolParser):
             fcall_delta.arguments = suffix
             has_updates = True
 
-        if has_tool_end and not has_updates:
-            if not getattr(parser_state, 'has_emitted_name', False) and not parser_state.arguments_buffer:
-                parser_state.reset_tool_call()
-                if hasattr(parser_state, 'has_emitted_name'):
-                    delattr(parser_state, 'has_emitted_name')
-            return None
-
-        if not has_updates:
-            return None
-
-        tool_delta = self._emit_tool_delta(parser_state, fcall_delta)
+        tool_delta = self._emit_tool_delta(parser_state, fcall_delta) if has_updates else None
 
         if has_tool_end:
+            # Always finalize the current tool call when the block closes, even
+            # when this chunk produced no new fragment, so the next block gets a
+            # fresh id/index and argument buffer.
             parser_state.reset_tool_call()
             if hasattr(parser_state, 'has_emitted_name'):
                 delattr(parser_state, 'has_emitted_name')
@@ -457,10 +485,10 @@ class Qwen3CoderToolParser(ToolParser):
             tool_content = match.group(1)
             func_name, args_dict, _ = self._extract_params(tool_content)
 
-            if func_name and args_dict:
+            if func_name:
                 tool_calls.append(
                     ToolCall(function=FunctionCall(
-                        name=func_name, arguments=json.dumps(args_dict, ensure_ascii=False))))
+                        name=func_name, arguments=json.dumps(args_dict, ensure_ascii=False) if args_dict else '{}')))
 
         if scan_pos < len(text):
             buf.append(text[scan_pos:])
